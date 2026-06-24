@@ -1,0 +1,17 @@
+## Build eredmények
+bin/
+obj/
+
+## Visual Studio
+.vs/
+*.user
+*.suo
+
+## IDE
+.idea/
+.vscode/
+
+## Egyéb
+*.log
+*.tmp
+minta.txt
