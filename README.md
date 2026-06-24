@@ -1,98 +1,85 @@
 # CSV → TXT Konverter
 
-Egyszerű parancssori C# program, amely egy CSV fájlt tabulátorral elválasztott TXT fájllá alakít.
+Egy könnyűsúlyú, parancssoros (CLI) C# alkalmazás, amely egy maximum 1 MB nagyságú `.csv` fájlt tabulátorral elválasztott `.txt` fájllá konvertál. A projekt szigorúan külső függőségek (3rd party NuGet csomagok és .dll-ek) nélkül készült.
 
 ## Követelmények
 
-- [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) vagy újabb
+- [.NET 8.0 SDK (LTS)](https://dotnet.microsoft.com/download/dotnet/8.0) 
 
-## Build
+## Build (Telepítés)
 
-```bash
-dotnet build Converter.slnx
-```
-
-Release build (önálló futtatható fájl):
+A projekt úgy van konfigurálva, hogy a `publish` parancs hatására automatikusan egyetlen `.exe` állományt hozzon létre (Single-file deployment), amihez csak a gépen lévő .NET 8 környezet szükséges.
 
 ```bash
-dotnet publish Converter/Converter.csproj -c Release -r win-x64 --self-contained false
+dotnet publish Converter/Converter.csproj -c Release
 ```
 
-A kimeneti exe:
+A kimeneti futtatható fájl itt jön létre:
+Converter/bin/Release/net8.0/publish/Converter.exe
 
-```
-Converter/bin/Release/net9.0/Converter.exe
-```
-
-Önálló (self-contained) exe, ha nincs telepítve .NET a gépen:
-
-```bash
-dotnet publish Converter/Converter.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
-```
-
-```
-Converter/bin/Release/net9.0/win-x64/publish/Converter.exe
-```
-
-## Használat
-
-A program **pontosan 1 argumentumot** vár: a bemeneti CSV fájl elérési útját.
+Használat
+A program terminálban használható, és pontosan 1 argumentumot vár: a bemeneti CSV fájl elérési útját. A CSV fájl mérete nem haladhatja meg az 1 MB-ot.
 
 ```bash
 Converter.exe adatok.csv
 ```
 
-Kimenet: ugyanabban a mappában létrejön az `adatok.txt` fájl. A CSV mezők tabulátorral (`\t`) lesznek elválasztva.
+Kimenet: A program ugyanabban a mappában (az .exe mellett) létrehozza az adatok.txt fájlt, és felülírja azt, ha már létezik. A mezők tabulátorral (\t) lesznek elválasztva.
 
 Példa:
 
-**adatok.csv**
+adatok.csv (bemenet)
+
 ```
+
 Nev,Kor,Varos
 Anna,25,Budapest
 Bela,30,Debrecen
 ```
 
-**adatok.txt** (kimenet)
+adatok.txt (kimenet)
+
 ```
+
 Nev	Kor	Varos
 Anna	25	Budapest
 Bela	30	Debrecen
 ```
 
-## Tesztek
-
-A projekt xUnit modulteszteket tartalmaz (3 teszteset):
+Tesztek
+A projekt nem használ külső keretrendszert (pl. xUnit), hanem egy saját, pofonegyszerű és gyors TestRunner implementációval rendelkezik, amely az alábbi parnccsal futtatható:
 
 ```bash
-dotnet test Converter.slnx
+dotnet run --project Converter.Tests/Converter.Tests.csproj -c Release
 ```
 
-| Teszt | Leírás |
-|-------|--------|
-| `Convert_ValidCsv_CreatesTabSeparatedTxtFile` | Érvényes CSV → TXT konverzió |
-| `Convert_CsvWithQuotedFields_PreservesCommasInsideQuotes` | Idézőjeles mezők kezelése |
-| `Convert_MissingFile_ThrowsFileNotFoundException` | Hiányzó fájl hibakezelés |
+Tartalmazott tesztesetek (5 db):
+Teszt NévMit ellenőrizConvert_ValidCsv_CreatesTabSeparatedTxtFileNextToExe	Normál CSV sikeres konvertálása TXT-be
+Convert_CsvWithQuotedFields_PreservesCommasInsideQuotes		Idézőjelek közé zárt, vesszőt tartalmazó mezők (RFC 4180)
+Convert_MissingFile_ThrowsFileNotFoundException		Nem létező fájl esetén a megfelelő kivétel dobása
+Convert_FileTooLarge_ThrowsInvalidOperationException 	Az 1 MB-os fájlméret-limit biztonsági ellenőrzése
+Convert_ExistingTxtFile_IsOverwritten	 Meglévő célfájl helyes felülírása
 
-## Projekt struktúra
+Projekt struktúra
 
-```
 Converter/
-├── Converter/              # Konzol alkalmazás
+├── Converter/              # A fő CLI alkalmazás és az üzleti logika
 │   ├── Program.cs
-│   └── CsvToTxtConverter.cs
-├── Converter.Tests/        # xUnit tesztek
-│   └── CsvToTxtConverterTests.cs
-├── Converter.slnx
+│   ├── CsvToTxtConverter.cs
+│   └── Converter.csproj    # Single-file publish beállításokkal
+├── Converter.Tests/        # Saját implementációjú tesztkörnyezet
+│   ├── Program.cs          # TestRunner és Assert logikák
+│   └── Converter.Tests.csproj
+├── minta.csv               # Példafájl a teszteléshez
+├── Converter.slnx          # Visual Studio 2022 / Rider solution fájl
 └── README.md
-```
 
-## Klónozás után
-
+Gyors indítás (Klónozás után)
+Ha frissen töltöd le a repót, az alábbi parancsokkal tudod azonnal tesztelni és lefordítani:
 ```bash
-git clone https://github.com/Slumper1122/Converter-project.git
+git clone [https://github.com/Slumper1122/Converter-project.git](https://github.com/Slumper1122/Converter-project.git)
 cd Converter-project
-dotnet build Converter.slnx
-dotnet test Converter.slnx
-dotnet run --project Converter/Converter.csproj -- minta.csv
+dotnet run --project Converter.Tests/Converter.Tests.csproj -c Release
+dotnet publish Converter/Converter.csproj -c Release
+Converter/bin/Release/net8.0/publish/Converter.exe minta.csv
 ```
