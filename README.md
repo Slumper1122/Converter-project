@@ -90,25 +90,9 @@ Converter/
 ## Klónozás után
 
 ```bash
-git clone <repo-url>
-cd Converter
+git clone https://github.com/Slumper1122/Converter-project.git
+cd Converter-project
 dotnet build Converter.slnx
 dotnet test Converter.slnx
 dotnet run --project Converter/Converter.csproj -- minta.csv
 ```
-
-## GitHub-ra feltöltés
-
-Ha még nincs Git telepítve: [git-scm.com/downloads](https://git-scm.com/downloads)
-
-```bash
-cd Converter
-git init
-git add .
-git commit -m "CSV to TXT konverter C# konzol alkalmazással és xUnit tesztekkel"
-git branch -M main
-git remote add origin https://github.com/<felhasznalonev>/Converter.git
-git push -u origin main
-```
-
-Előtte hozz létre egy üres repository-t a GitHubon (README nélkül, hogy ne legyen merge conflict).
