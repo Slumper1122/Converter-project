@@ -1,28 +1,8 @@
-namespace Converter;
+namespace Converter.Parsing;
 
-public static class CsvToTxtConverter
+public static class CsvLineParser
 {
-    public static string Convert(string csvFilePath)
-    {
-        if (string.IsNullOrWhiteSpace(csvFilePath))
-        {
-            throw new ArgumentException("A CSV fájl elérési útja nem lehet üres.", nameof(csvFilePath));
-        }
-
-        if (!File.Exists(csvFilePath))
-        {
-            throw new FileNotFoundException($"A megadott CSV fájl nem található: {csvFilePath}", csvFilePath);
-        }
-
-        var outputPath = Path.ChangeExtension(csvFilePath, ".txt");
-        var lines = File.ReadAllLines(csvFilePath);
-        var outputLines = lines.Select(ParseCsvLine).Select(fields => string.Join('\t', fields));
-
-        File.WriteAllLines(outputPath, outputLines);
-        return outputPath;
-    }
-
-    internal static string[] ParseCsvLine(string line)
+    public static string[] Parse(string line)
     {
         if (string.IsNullOrEmpty(line))
         {
@@ -64,5 +44,20 @@ public static class CsvToTxtConverter
 
         fields.Add(current.ToString());
         return fields.ToArray();
+    }
+
+    public static string Format(IReadOnlyList<string> fields)
+    {
+        return string.Join(',', fields.Select(EscapeField));
+    }
+
+    private static string EscapeField(string field)
+    {
+        if (field.Contains('"') || field.Contains(',') || field.Contains('\n') || field.Contains('\r'))
+        {
+            return $"\"{field.Replace("\"", "\"\"")}\"";
+        }
+
+        return field;
     }
 }
