@@ -1,6 +1,9 @@
 ## Build eredmények
 bin/
 obj/
+coverage/
+coveragereport/
+TestResults/
 
 ## Visual Studio
 .vs/
@@ -9,9 +12,9 @@ obj/
 
 ## IDE
 .idea/
-.vscode/
 
 ## Egyéb
 *.log
 *.tmp
 minta.txt
+Converter-project/

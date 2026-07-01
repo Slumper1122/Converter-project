@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+jobs:
+  build-test:
+    name: Build & Test (.NET ${{ matrix.dotnet-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dotnet-version: ['8.0.x', '9.0.x', '10.0.x']
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.dotnet-version }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore dependencies
+        run: dotnet restore Converter.slnx
+
+      - name: Build project
+        run: dotnet build Converter.slnx --no-restore -c Debug
+
+      - name: Run tests and collect coverage
+        run: >
+          dotnet test Converter.slnx --no-build -c Debug
+          --settings coverlet.runsettings
+          --logger "trx;LogFileName=test-results-${{ matrix.dotnet-version }}.trx"
+          --results-directory TestResults
+          --collect:"XPlat Code Coverage"
+
+      - name: Publish unit test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: TestResults/**/*.trx
+          check_name: Test Results (.NET ${{ matrix.dotnet-version }})
+
+      - name: Generate coverage report
+        if: matrix.dotnet-version == '8.0.x'
+        uses: danielpalme/ReportGenerator-Github-Action@5.4.15
+        with:
+          reports: TestResults/**/coverage.cobertura.xml
+          targetdir: coveragereport
+          reporttypes: HtmlInline_AzurePipelines;Cobertura;TextSummary;MarkdownSummaryGithub
+          verbosity: Info
+
+      - name: Enforce branch coverage threshold (min 60%)
+        if: matrix.dotnet-version == '8.0.x'
+        run: |
+          echo "=== Coverage Summary ==="
+          cat coveragereport/Summary.txt
+          BRANCH=$(grep -E 'Branch coverage' coveragereport/Summary.txt | grep -oE '[0-9]+\.?[0-9]*' | head -1)
+          echo "Branch coverage detected: ${BRANCH}%"
+          python3 - <<'PY'
+          import re, sys
+          text = open("coveragereport/Summary.txt").read()
+          match = re.search(r"Branch coverage:\s*([\d.]+)%", text)
+          if not match:
+              print("Could not parse branch coverage from Summary.txt")
+              sys.exit(1)
+          value = float(match.group(1))
+          print(f"Parsed branch coverage: {value}%")
+          if value < 60:
+              print("FAIL: Branch coverage is below the required 60% threshold.")
+              sys.exit(1)
+          print("PASS: Branch coverage meets the 60% threshold.")
+          PY
+
+      - name: Upload coverage artifact
+        if: matrix.dotnet-version == '8.0.x'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coveragereport/
+            TestResults/**/coverage.cobertura.xml
+
+  publish-exe:
+    name: Publish and smoke-test executable
+    runs-on: windows-latest
+    needs: build-test
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore dependencies
+        run: dotnet restore Converter.slnx
+
+      - name: Publish single-file executable
+        run: dotnet publish Converter/Converter.csproj -c Release -p:DebugType=none -p:DebugSymbols=false
+
+      - name: Smoke test published executable
+        shell: pwsh
+        run: |
+          $publishDir = Get-ChildItem -Path Converter/bin/Release -Recurse -Directory -Filter publish | Select-Object -First 1
+          if (-not $publishDir) { throw "Publish directory not found." }
+          Copy-Item samples/sample.csv $publishDir.FullName
+          & "$($publishDir.FullName)/Converter.exe" "$($publishDir.FullName)/sample.csv" json
+          if (-not (Test-Path "$($publishDir.FullName)/sample.json")) { throw "Expected sample.json was not created." }
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: converter-exe
+          path: Converter/bin/Release/**/publish/Converter.exe
