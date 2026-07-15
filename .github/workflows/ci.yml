@@ -136,7 +136,7 @@ jobs:
       # ── Step 10 (only on .NET 8 leg) ────────────────────────────────────────
       # Uploads coverage HTML + raw XML as a downloadable workflow artifact.
       - name: Upload coverage report artifact
-        if: matrix.dotnet-version == '8.0.x' && always()
+        if: always() && matrix.dotnet-version == '8.0.x'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
@@ -203,11 +203,9 @@ jobs:
             exit 1
           }
           Write-Host "Publish directory: $($publishDir.FullName)"
-
           Copy-Item samples/sample.csv $publishDir.FullName
           Write-Host "Running: Converter.exe sample.csv json"
           & "$($publishDir.FullName)/Converter.exe" "$($publishDir.FullName)/sample.csv" json
-
           if (-not (Test-Path "$($publishDir.FullName)/sample.json")) {
             Write-Error "Smoke test FAILED: expected sample.json was not created next to the exe."
             exit 1
