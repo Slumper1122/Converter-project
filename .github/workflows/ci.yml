@@ -1,11 +1,21 @@
 name: CI
 
+# ── Triggers ──────────────────────────────────────────────────────────────────
+# Runs on every push to any branch, on pull-requests targeting main,
+# and can be started manually from the GitHub Actions UI (workflow_dispatch).
 on:
   push:
     branches: ['**']
   pull_request:
     branches: [main]
+  workflow_dispatch:          # enables the "Run workflow" button in GitHub UI
+    inputs:
+      reason:
+        description: 'Reason for manual run (optional)'
+        required: false
+        default: 'manual trigger'
 
+# Cancel in-progress runs for the same branch/PR to avoid wasted minutes.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -15,25 +25,32 @@ permissions:
   checks: write
   pull-requests: write
 
+# ── Job 1: Build & Test (matrix: .NET 8 / 9 / 10) ────────────────────────────
 jobs:
   build-test:
     name: Build & Test (.NET ${{ matrix.dotnet-version }})
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
+      fail-fast: false          # keep running other matrix legs even if one fails
       matrix:
         dotnet-version: ['8.0.x', '9.0.x', '10.0.x']
 
     steps:
+      # ── Step 1 ──────────────────────────────────────────────────────────────
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Setup .NET SDK
+      # ── Step 2 ──────────────────────────────────────────────────────────────
+      - name: Setup .NET ${{ matrix.dotnet-version }} SDK
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ matrix.dotnet-version }}
 
+      # ── Step 3 ──────────────────────────────────────────────────────────────
+      # Cache NuGet packages keyed on .csproj content hash.
+      # If any .csproj changes the cache key changes → fresh restore.
       - name: Cache NuGet packages
+        id: nuget-cache
         uses: actions/cache@v4
         with:
           path: ~/.nuget/packages
@@ -41,28 +58,50 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-nuget-
 
+      - name: Report cache status
+        run: |
+          if [ "${{ steps.nuget-cache.outputs.cache-hit }}" == "true" ]; then
+            echo "NuGet cache HIT — skipping download."
+          else
+            echo "NuGet cache MISS — packages will be downloaded."
+          fi
+
+      # ── Step 4 ──────────────────────────────────────────────────────────────
       - name: Restore dependencies
-        run: dotnet restore Converter.slnx
+        run: |
+          echo "Restoring NuGet packages for Converter.slnx ..."
+          dotnet restore Converter.slnx
+          echo "Restore complete."
 
+      # ── Step 5 ──────────────────────────────────────────────────────────────
       - name: Build project
-        run: dotnet build Converter.slnx --no-restore -c Debug
+        run: |
+          echo "Building solution in Debug configuration ..."
+          dotnet build Converter.slnx --no-restore -c Debug
+          echo "Build succeeded."
 
-      - name: Run tests and collect coverage
-        run: >
-          dotnet test Converter.slnx --no-build -c Debug
-          --settings coverlet.runsettings
-          --logger "trx;LogFileName=test-results-${{ matrix.dotnet-version }}.trx"
-          --results-directory TestResults
-          --collect:"XPlat Code Coverage"
+      # ── Step 6 ──────────────────────────────────────────────────────────────
+      - name: Run tests and collect code coverage
+        run: |
+          echo "Running xUnit tests with XPlat Code Coverage collector ..."
+          dotnet test Converter.slnx --no-build -c Debug \
+            --settings coverlet.runsettings \
+            --logger "trx;LogFileName=test-results-${{ matrix.dotnet-version }}.trx" \
+            --results-directory TestResults \
+            --collect:"XPlat Code Coverage"
+          echo "Tests finished."
 
+      # ── Step 7 ──────────────────────────────────────────────────────────────
+      # Publishes test results as PR annotations and a GitHub Check.
       - name: Publish unit test results
         uses: EnricoMi/publish-unit-test-result-action@v2
-        if: always()
+        if: always()            # run even if tests failed so results are visible
         with:
           files: TestResults/**/*.trx
           check_name: Test Results (.NET ${{ matrix.dotnet-version }})
 
-      - name: Generate coverage report
+      # ── Step 8 (only on .NET 8 leg) ─────────────────────────────────────────
+      - name: Generate HTML coverage report
         if: matrix.dotnet-version == '8.0.x'
         uses: danielpalme/ReportGenerator-Github-Action@5.4.15
         with:
@@ -71,68 +110,114 @@ jobs:
           reporttypes: HtmlInline_AzurePipelines;Cobertura;TextSummary;MarkdownSummaryGithub
           verbosity: Info
 
-      - name: Enforce branch coverage threshold (min 60%)
+      # ── Step 9 (only on .NET 8 leg) ─────────────────────────────────────────
+      - name: Enforce minimum 60% branch coverage
         if: matrix.dotnet-version == '8.0.x'
         run: |
           echo "=== Coverage Summary ==="
           cat coveragereport/Summary.txt
-          BRANCH=$(grep -E 'Branch coverage' coveragereport/Summary.txt | grep -oE '[0-9]+\.?[0-9]*' | head -1)
-          echo "Branch coverage detected: ${BRANCH}%"
           python3 - <<'PY'
           import re, sys
           text = open("coveragereport/Summary.txt").read()
           match = re.search(r"Branch coverage:\s*([\d.]+)%", text)
           if not match:
-              print("Could not parse branch coverage from Summary.txt")
+              print("ERROR: Could not parse branch coverage from Summary.txt")
+              print("Hint: Check that coverlet.runsettings is present and the test run produced coverage.cobertura.xml")
               sys.exit(1)
           value = float(match.group(1))
-          print(f"Parsed branch coverage: {value}%")
+          print(f"Branch coverage: {value}%  (threshold: 60%)")
           if value < 60:
-              print("FAIL: Branch coverage is below the required 60% threshold.")
+              print(f"FAIL: {value}% is below the required 60%.")
+              print("Hint: Add tests for uncovered branches, then push again.")
               sys.exit(1)
-          print("PASS: Branch coverage meets the 60% threshold.")
+          print(f"PASS: {value}% meets the required 60% threshold.")
           PY
 
-      - name: Upload coverage artifact
-        if: matrix.dotnet-version == '8.0.x'
+      # ── Step 10 (only on .NET 8 leg) ────────────────────────────────────────
+      # Uploads coverage HTML + raw XML as a downloadable workflow artifact.
+      - name: Upload coverage report artifact
+        if: matrix.dotnet-version == '8.0.x' && always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: |
             coveragereport/
             TestResults/**/coverage.cobertura.xml
+          if-no-files-found: warn
 
+      # ── Step 11 ─────────────────────────────────────────────────────────────
+      # Always upload raw TRX test result files so they can be inspected
+      # even when the test step itself failed.
+      - name: Upload test result files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.dotnet-version }}
+          path: TestResults/**/*.trx
+          if-no-files-found: warn
+
+  # ── Job 2: Publish single-file exe + smoke test ───────────────────────────
   publish-exe:
     name: Publish and smoke-test executable
     runs-on: windows-latest
-    needs: build-test
+    needs: build-test           # only run if all build-test matrix legs pass
 
     steps:
+      # ── Step 1 ──────────────────────────────────────────────────────────────
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Setup .NET SDK
+      # ── Step 2 ──────────────────────────────────────────────────────────────
+      - name: Setup .NET 8 SDK
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
 
+      # ── Step 3 ──────────────────────────────────────────────────────────────
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      # ── Step 4 ──────────────────────────────────────────────────────────────
       - name: Restore dependencies
         run: dotnet restore Converter.slnx
 
+      # ── Step 5 ──────────────────────────────────────────────────────────────
       - name: Publish single-file executable
-        run: dotnet publish Converter/Converter.csproj -c Release -p:DebugType=none -p:DebugSymbols=false
+        run: |
+          echo "Publishing Converter as a single-file executable ..."
+          dotnet publish Converter/Converter.csproj -c Release -p:DebugType=none -p:DebugSymbols=false
+          echo "Publish complete."
 
+      # ── Step 6 ──────────────────────────────────────────────────────────────
       - name: Smoke test published executable
         shell: pwsh
         run: |
           $publishDir = Get-ChildItem -Path Converter/bin/Release -Recurse -Directory -Filter publish | Select-Object -First 1
-          if (-not $publishDir) { throw "Publish directory not found." }
-          Copy-Item samples/sample.csv $publishDir.FullName
-          & "$($publishDir.FullName)/Converter.exe" "$($publishDir.FullName)/sample.csv" json
-          if (-not (Test-Path "$($publishDir.FullName)/sample.json")) { throw "Expected sample.json was not created." }
+          if (-not $publishDir) {
+            Write-Error "Publish directory not found. Did the publish step succeed?"
+            exit 1
+          }
+          Write-Host "Publish directory: $($publishDir.FullName)"
 
+          Copy-Item samples/sample.csv $publishDir.FullName
+          Write-Host "Running: Converter.exe sample.csv json"
+          & "$($publishDir.FullName)/Converter.exe" "$($publishDir.FullName)/sample.csv" json
+
+          if (-not (Test-Path "$($publishDir.FullName)/sample.json")) {
+            Write-Error "Smoke test FAILED: expected sample.json was not created next to the exe."
+            exit 1
+          }
+          Write-Host "Smoke test PASSED: sample.json created successfully."
+
+      # ── Step 7 ──────────────────────────────────────────────────────────────
       - name: Upload executable artifact
         uses: actions/upload-artifact@v4
         with:
           name: converter-exe
           path: Converter/bin/Release/**/publish/Converter.exe
+          if-no-files-found: error
