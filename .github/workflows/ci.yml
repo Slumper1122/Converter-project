@@ -64,12 +64,10 @@ jobs:
           fi
 
       # ── Step 4 ──────────────────────────────────────────────────────────────
-      # --locked-mode: if .csproj changes without updating packages.lock.json
-      # this step fails with a clear message → prevents silent version drift.
       - name: Restore dependencies
         run: |
-          echo "Restoring NuGet packages (locked mode) ..."
-          dotnet restore Converter.slnx --locked-mode
+          echo "Restoring NuGet packages ..."
+          dotnet restore Converter.slnx
           echo "Restore complete."
 
       # ── Step 5 ──────────────────────────────────────────────────────────────
@@ -179,7 +177,7 @@ jobs:
 
       # ── Step 4 ──────────────────────────────────────────────────────────────
       - name: Restore dependencies
-        run: dotnet restore Converter.slnx --locked-mode
+        run: dotnet restore Converter.slnx
 
       # ── Step 5 ──────────────────────────────────────────────────────────────
       - name: Publish single-file executable
