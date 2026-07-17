@@ -58,9 +58,9 @@ jobs:
       - name: Report cache status
         run: |
           if [ "${{ steps.nuget-cache.outputs.cache-hit }}" == "true" ]; then
-            echo "NuGet cache HIT — skipping download."
+            echo "::notice::NuGet cache HIT — using cached packages, skipping download."
           else
-            echo "NuGet cache MISS — packages will be downloaded."
+            echo "::notice::NuGet cache MISS — .csproj changed or first run, downloading packages."
           fi
 
       # ── Step 4 ──────────────────────────────────────────────────────────────
@@ -69,6 +69,19 @@ jobs:
           echo "Restoring NuGet packages ..."
           dotnet restore Converter.slnx
           echo "Restore complete."
+
+      # ── Step 4b ─────────────────────────────────────────────────────────────
+      - name: Validate restored dependencies
+        run: |
+          echo "=== Installed packages ==="
+          dotnet list Converter.slnx package
+          echo ""
+          echo "=== Verifying no version conflicts ==="
+          dotnet list Converter.slnx package --vulnerable --include-transitive 2>&1 | tee vuln.txt || true
+          if grep -q "has the following vulnerable packages" vuln.txt; then
+            echo "::warning::One or more packages have known vulnerabilities. Review 'vuln.txt' output above."
+          fi
+          echo "Dependency validation complete."
 
       # ── Step 5 ──────────────────────────────────────────────────────────────
       - name: Build project

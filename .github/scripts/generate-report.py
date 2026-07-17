@@ -27,10 +27,6 @@ def env(key: str, default: str = "unknown") -> str:
     return os.environ.get(key, default)
 
 
-def status_icon(result: str) -> str:
-    return "✅" if result == "success" else "❌"
-
-
 def parse_trx(path: str) -> dict:
     """Parse a .trx XML file and return test counters."""
     try:
@@ -39,14 +35,22 @@ def parse_trx(path: str) -> dict:
         counters = root.find(f".//{{{TRX_NS}}}Counters")
         if counters is None:
             return {"passed": 0, "failed": 0, "total": 0, "error": "No counters found"}
+
+        # Also collect individual failed test names for the report
+        failed_tests = []
+        for result in root.findall(f".//{{{TRX_NS}}}UnitTestResult"):
+            if result.get("outcome") == "Failed":
+                failed_tests.append(result.get("testName", "unknown"))
+
         return {
-            "passed": int(counters.get("passed", 0)),
-            "failed": int(counters.get("failed", 0)),
-            "total":  int(counters.get("total", 0)),
-            "error":  None,
+            "passed":       int(counters.get("passed", 0)),
+            "failed":       int(counters.get("failed", 0)),
+            "total":        int(counters.get("total", 0)),
+            "failed_tests": failed_tests,
+            "error":        None,
         }
     except Exception as ex:
-        return {"passed": 0, "failed": 0, "total": 0, "error": str(ex)}
+        return {"passed": 0, "failed": 0, "total": 0, "failed_tests": [], "error": str(ex)}
 
 
 def collect_test_results() -> dict:
@@ -56,18 +60,62 @@ def collect_test_results() -> dict:
         pattern = f"dl/trx/{version}/*.trx"
         files = glob.glob(pattern)
         if not files:
-            results[version] = {"passed": 0, "failed": 0, "total": 0, "error": "No TRX file found"}
+            results[version] = {
+                "passed": 0, "failed": 0, "total": 0,
+                "failed_tests": [], "error": "No TRX file found (artifact missing or job skipped)"
+            }
             continue
-        totals = {"passed": 0, "failed": 0, "total": 0, "error": None}
+        totals = {"passed": 0, "failed": 0, "total": 0, "failed_tests": [], "error": None}
         for f in files:
             r = parse_trx(f)
             totals["passed"] += r["passed"]
             totals["failed"] += r["failed"]
             totals["total"]  += r["total"]
+            totals["failed_tests"].extend(r.get("failed_tests", []))
             if r["error"]:
                 totals["error"] = r["error"]
         results[version] = totals
     return results
+
+
+def compare_results(results: dict) -> list[str]:
+    """
+    Compare results across .NET versions.
+    Returns a list of warning/info strings about discrepancies.
+    """
+    notes = []
+    available = {v: r for v, r in results.items() if r["total"] > 0}
+
+    if len(available) < 2:
+        return ["⚠️ Not enough data to compare versions."]
+
+    totals = [r["total"] for r in available.values()]
+    if len(set(totals)) > 1:
+        notes.append(
+            "⚠️ **Test count mismatch across versions** — different number of tests ran per .NET version:"
+        )
+        for v, r in available.items():
+            notes.append(f"  - {v}: {r['total']} tests")
+    else:
+        notes.append(f"✅ All versions ran the same number of tests: **{totals[0]}**")
+
+    failures_by_version = {v: r["failed"] for v, r in available.items() if r["failed"] > 0}
+    if failures_by_version:
+        failing_versions = list(failures_by_version.keys())
+        passing_versions = [v for v in available if v not in failures_by_version]
+        if passing_versions:
+            notes.append(
+                f"⚠️ **Version-specific failure** — "
+                f"failing on {', '.join(failing_versions)}, "
+                f"passing on {', '.join(passing_versions)}. "
+                f"This may indicate a .NET API compatibility issue."
+            )
+        else:
+            notes.append("❌ Tests failed on all versions.")
+    else:
+        notes.append("✅ All versions passed all tests consistently.")
+
+    return notes
 
 
 def parse_coverage() -> dict:
@@ -93,16 +141,13 @@ def build_report(now: datetime) -> str:
     run_num = env("RUN_NUMBER")
     repo    = env("REPO")
 
-    overall_ok = (build_test_result == "success" and publish_exe_result == "success")
+    overall_ok   = (build_test_result == "success" and publish_exe_result == "success")
     overall_icon = "✅ SUCCESS" if overall_ok else "❌ FAILED"
 
     test_results = collect_test_results()
     coverage     = parse_coverage()
+    comparison   = compare_results(test_results)
 
-    all_tests_passed = all(
-        r["failed"] == 0 and r["total"] > 0
-        for r in test_results.values()
-    )
     total_passed = sum(r["passed"] for r in test_results.values())
     total_failed = sum(r["failed"] for r in test_results.values())
     total_tests  = sum(r["total"]  for r in test_results.values())
@@ -114,23 +159,25 @@ def build_report(now: datetime) -> str:
     elif cov_value < COVERAGE_THRESHOLD:
         cov_display = f"🔴 **{cov_value:.1f}%** — BELOW {COVERAGE_THRESHOLD:.0f}% threshold!"
         cov_alert   = (
-            f"\n> 🚨 **Coverage alert:** branch coverage {cov_value:.1f}% is below the required "
-            f"{COVERAGE_THRESHOLD:.0f}%. Add tests for uncovered branches.\n"
+            f"\n> 🚨 **Coverage alert:** branch coverage is {cov_value:.1f}%, "
+            f"below the required {COVERAGE_THRESHOLD:.0f}%.\n"
+            f"> Run `dotnet test` locally with coverage and open `coveragereport/index.html` "
+            f"to find uncovered branches.\n"
         )
     else:
         cov_display = f"🟢 {cov_value:.1f}%"
         cov_alert   = ""
 
     actions_url = f"https://github.com/{repo}/actions/runs/{run_id}"
-    ts_iso = now.strftime("%Y-%m-%d %H:%M:%S UTC")
+    ts_iso      = now.strftime("%Y-%m-%d %H:%M:%S UTC")
 
     lines = [
         f"# Build Report — {ts_iso}",
         "",
         "## Summary",
         "",
-        f"| Field | Value |",
-        f"|-------|-------|",
+        "| Field | Value |",
+        "|-------|-------|",
         f"| **Status** | {overall_icon} |",
         f"| Branch | `{branch}` |",
         f"| Commit | `{sha}` |",
@@ -147,14 +194,14 @@ def build_report(now: datetime) -> str:
         ]
         if build_test_result != "success":
             lines.append(
-                f"- **Build & Test** — `{build_test_result}` "
-                f"— check [Actions log]({actions_url}) for the exact failing step "
-                f"(restore / build / test / coverage)"
+                f"- **Build & Test** — result: `{build_test_result}`  "
+                f"→ [Open Actions log]({actions_url}) and look for the first red step "
+                f"(restore → build → test → coverage)"
             )
         if publish_exe_result != "success":
             lines.append(
-                f"- **Publish & Smoke Test** — `{publish_exe_result}` "
-                f"— check [Actions log]({actions_url})"
+                f"- **Publish & Smoke Test** — result: `{publish_exe_result}`  "
+                f"→ [Open Actions log]({actions_url})"
             )
         lines.append("")
 
@@ -162,8 +209,8 @@ def build_report(now: datetime) -> str:
     lines += [
         "## Test Results",
         "",
-        f"| .NET Version | Passed | Failed | Total | Status |",
-        f"|---|---|---|---|---|",
+        "| .NET Version | ✅ Passed | ❌ Failed | Total | Status |",
+        "|---|---|---|---|---|",
     ]
     for version in DOTNET_VERSIONS:
         r = test_results[version]
@@ -176,24 +223,44 @@ def build_report(now: datetime) -> str:
         lines.append(
             f"| {version} | {r['passed']} | {r['failed']} | {r['total']} | {row_icon} |"
         )
+
     lines += [
         "",
-        f"**Total: {total_passed} passed, {total_failed} failed, {total_tests} total**",
+        f"**Total across all versions: {total_passed} passed, {total_failed} failed, {total_tests} total**",
         "",
     ]
 
-    if total_failed > 0:
+    # ── Failed test names ──────────────────────────────────────────────────────
+    all_failed: dict[str, list[str]] = {
+        v: r["failed_tests"] for v, r in test_results.items() if r.get("failed_tests")
+    }
+    if all_failed:
+        lines += ["### ❌ Failing Tests", ""]
+        for version, names in all_failed.items():
+            lines.append(f"**{version}:**")
+            for name in names:
+                lines.append(f"- `{name}`")
         lines += [
-            "> ❌ **Some tests failed.** Run `dotnet test Converter.slnx -c Debug` locally to reproduce.",
+            "",
+            "> Run `dotnet test Converter.slnx -c Debug` locally to reproduce.",
             "",
         ]
 
+    # ── Cross-version comparison ───────────────────────────────────────────────
+    lines += [
+        "## Cross-Version Comparison",
+        "",
+    ]
+    for note in comparison:
+        lines.append(note)
+    lines.append("")
+
     # ── Coverage ───────────────────────────────────────────────────────────────
     lines += [
-        "## Branch Coverage",
+        "## Branch Coverage (.NET 8)",
         "",
-        f"| Metric | Value |",
-        f"|--------|-------|",
+        "| Metric | Value |",
+        "|--------|-------|",
         f"| Branch coverage | {cov_display} |",
         f"| Threshold | {COVERAGE_THRESHOLD:.0f}% |",
         "",
@@ -245,7 +312,6 @@ def main():
     print()
     print(report)
 
-    # Signal the filename for the CI step to pick up
     output_file = os.environ.get("GITHUB_OUTPUT", "")
     if output_file:
         with open(output_file, "a") as f:
