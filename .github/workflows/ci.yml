@@ -1,21 +1,20 @@
 name: CI
 
 # ── Triggers ──────────────────────────────────────────────────────────────────
-# Runs on every push to any branch, on pull-requests targeting main,
-# and can be started manually from the GitHub Actions UI (workflow_dispatch).
 on:
   push:
     branches: ['**']
+    paths-ignore:
+      - 'archive/**'          # prevent infinite loop from CI archive commits
   pull_request:
     branches: [main]
-  workflow_dispatch:          # enables the "Run workflow" button in GitHub UI
+  workflow_dispatch:
     inputs:
       reason:
         description: 'Reason for manual run (optional)'
         required: false
         default: 'manual trigger'
 
-# Cancel in-progress runs for the same branch/PR to avoid wasted minutes.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -31,7 +30,7 @@ jobs:
     name: Build & Test (.NET ${{ matrix.dotnet-version }})
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false          # keep running other matrix legs even if one fails
+      fail-fast: false
       matrix:
         dotnet-version: ['8.0.x', '9.0.x', '10.0.x']
 
@@ -47,8 +46,6 @@ jobs:
           dotnet-version: ${{ matrix.dotnet-version }}
 
       # ── Step 3 ──────────────────────────────────────────────────────────────
-      # Cache NuGet packages keyed on .csproj content hash.
-      # If any .csproj changes the cache key changes → fresh restore.
       - name: Cache NuGet packages
         id: nuget-cache
         uses: actions/cache@v4
@@ -67,9 +64,8 @@ jobs:
           fi
 
       # ── Step 4 ──────────────────────────────────────────────────────────────
-      # --locked-mode ensures packages.lock.json is respected exactly.
-      # If a .csproj dependency changes without regenerating the lock file,
-      # this step fails with a clear error — preventing silent version drift.
+      # --locked-mode: if .csproj changes without updating packages.lock.json
+      # this step fails with a clear message → prevents silent version drift.
       - name: Restore dependencies
         run: |
           echo "Restoring NuGet packages (locked mode) ..."
@@ -95,10 +91,9 @@ jobs:
           echo "Tests finished."
 
       # ── Step 7 ──────────────────────────────────────────────────────────────
-      # Publishes test results as PR annotations and a GitHub Check.
       - name: Publish unit test results
         uses: EnricoMi/publish-unit-test-result-action@v2
-        if: always()            # run even if tests failed so results are visible
+        if: always()
         with:
           files: TestResults/**/*.trx
           check_name: Test Results (.NET ${{ matrix.dotnet-version }})
@@ -125,7 +120,7 @@ jobs:
           match = re.search(r"Branch coverage:\s*([\d.]+)%", text)
           if not match:
               print("ERROR: Could not parse branch coverage from Summary.txt")
-              print("Hint: Check that coverlet.runsettings is present and the test run produced coverage.cobertura.xml")
+              print("Hint: Check that coverlet.runsettings is present and produced coverage.cobertura.xml")
               sys.exit(1)
           value = float(match.group(1))
           print(f"Branch coverage: {value}%  (threshold: 60%)")
@@ -137,7 +132,6 @@ jobs:
           PY
 
       # ── Step 10 (only on .NET 8 leg) ────────────────────────────────────────
-      # Uploads coverage HTML + raw XML as a downloadable workflow artifact.
       - name: Upload coverage report artifact
         if: always() && matrix.dotnet-version == '8.0.x'
         uses: actions/upload-artifact@v4
@@ -149,8 +143,6 @@ jobs:
           if-no-files-found: warn
 
       # ── Step 11 ─────────────────────────────────────────────────────────────
-      # Always upload raw TRX test result files so they can be inspected
-      # even when the test step itself failed.
       - name: Upload test result files
         if: always()
         uses: actions/upload-artifact@v4
@@ -163,7 +155,7 @@ jobs:
   publish-exe:
     name: Publish and smoke-test executable
     runs-on: windows-latest
-    needs: build-test           # only run if all build-test matrix legs pass
+    needs: build-test
 
     steps:
       # ── Step 1 ──────────────────────────────────────────────────────────────
@@ -187,7 +179,7 @@ jobs:
 
       # ── Step 4 ──────────────────────────────────────────────────────────────
       - name: Restore dependencies
-        run: dotnet restore Converter.slnx
+        run: dotnet restore Converter.slnx --locked-mode
 
       # ── Step 5 ──────────────────────────────────────────────────────────────
       - name: Publish single-file executable
@@ -222,3 +214,79 @@ jobs:
           name: converter-exe
           path: Converter/bin/Release/**/publish/Converter.exe
           if-no-files-found: error
+
+  # ── Job 3: Generate & save build report to archive/ ──────────────────────
+  save-report:
+    name: Save build report
+    runs-on: ubuntu-latest
+    needs: [build-test, publish-exe]
+    if: always()                    # runs even when build-test or publish-exe failed
+    permissions:
+      contents: write               # needed to commit archive/ back to the repo
+
+    steps:
+      # ── Step 1 ──────────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      # ── Step 2 ──────────────────────────────────────────────────────────────
+      - name: Download coverage artifact
+        uses: actions/download-artifact@v4
+        continue-on-error: true     # coverage may not exist if build failed early
+        with:
+          name: coverage-report
+          path: dl/coverage
+
+      # ── Step 3 ──────────────────────────────────────────────────────────────
+      - name: Download test results (.NET 8)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: test-results-8.0.x
+          path: dl/trx/8.0.x
+
+      # ── Step 4 ──────────────────────────────────────────────────────────────
+      - name: Download test results (.NET 9)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: test-results-9.0.x
+          path: dl/trx/9.0.x
+
+      # ── Step 5 ──────────────────────────────────────────────────────────────
+      - name: Download test results (.NET 10)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: test-results-10.0.x
+          path: dl/trx/10.0.x
+
+      # ── Step 6 ──────────────────────────────────────────────────────────────
+      - name: Generate build report
+        id: report
+        env:
+          BUILD_TEST_RESULT:  ${{ needs.build-test.result }}
+          PUBLISH_EXE_RESULT: ${{ needs.publish-exe.result }}
+          BRANCH:  ${{ github.head_ref || github.ref_name }}
+          SHA:     ${{ github.sha }}
+          RUN_ID:  ${{ github.run_id }}
+          RUN_NUMBER: ${{ github.run_number }}
+          REPO:    ${{ github.repository }}
+        run: python3 .github/scripts/generate-report.py
+
+      # ── Step 7 ──────────────────────────────────────────────────────────────
+      - name: Commit report to archive/
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add archive/
+          # Only commit if there is something new to commit
+          if git diff --staged --quiet; then
+            echo "Nothing to commit."
+          else
+            git commit -m "ci: build report run #${{ github.run_number }} [skip ci]"
+            git push
+          fi
