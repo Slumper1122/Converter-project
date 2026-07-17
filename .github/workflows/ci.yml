@@ -67,10 +67,13 @@ jobs:
           fi
 
       # ── Step 4 ──────────────────────────────────────────────────────────────
+      # --locked-mode ensures packages.lock.json is respected exactly.
+      # If a .csproj dependency changes without regenerating the lock file,
+      # this step fails with a clear error — preventing silent version drift.
       - name: Restore dependencies
         run: |
-          echo "Restoring NuGet packages for Converter.slnx ..."
-          dotnet restore Converter.slnx
+          echo "Restoring NuGet packages (locked mode) ..."
+          dotnet restore Converter.slnx --locked-mode
           echo "Restore complete."
 
       # ── Step 5 ──────────────────────────────────────────────────────────────
